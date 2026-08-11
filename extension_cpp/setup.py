@@ -24,6 +24,28 @@ else:
     py_limited_api = False
 
 
+def _find_cutlass_include():
+    """Locate the CUTLASS/CuTe `include` dir for compiling gemm.cu."""
+    # 1) Explicit override.
+    env = os.environ.get("CUTLASS_PATH")
+    if env:
+        for cand in (env, os.path.join(env, "include")):
+            if os.path.exists(os.path.join(cand, "cute", "tensor.hpp")):
+                return cand
+    # 2) Headers shipped by the `nvidia-cutlass` wheel.
+    try:
+        import cutlass_library
+
+        cand = os.path.join(
+            os.path.dirname(cutlass_library.__file__), "source", "include"
+        )
+        if os.path.exists(os.path.join(cand, "cute", "tensor.hpp")):
+            return cand
+    except ImportError:
+        pass
+    return None
+
+
 def get_extensions():
     debug_mode = os.getenv("DEBUG", "0") == "1"
     use_cuda = os.getenv("USE_CUDA", "1") == "1"
@@ -42,6 +64,11 @@ def get_extensions():
         ],
         "nvcc": [
             "-O3" if not debug_mode else "-O0",
+            # CuTe / CUTLASS (gemm.cu) require C++17 and relaxed device
+            # constexpr / extended lambdas.
+            "-std=c++17",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
         ],
     }
     if debug_mode:
@@ -59,10 +86,24 @@ def get_extensions():
     if use_cuda:
         sources += cuda_sources
 
+    # CuTe / CUTLASS headers needed by csrc/cuda/gemm.cu. Prefer the headers
+    # shipped by the `nvidia-cutlass` wheel; fall back to a CUTLASS_PATH env var.
+    include_dirs = []
+    if use_cuda:
+        cutlass_include = _find_cutlass_include()
+        if cutlass_include is None:
+            raise RuntimeError(
+                "Could not locate CUTLASS/CuTe headers required by gemm.cu. "
+                "Install them with `pip install nvidia-cutlass`, or set "
+                "CUTLASS_PATH to a CUTLASS checkout (its 'include' dir)."
+            )
+        include_dirs.append(cutlass_include)
+
     ext_modules = [
         extension(
             f"{library_name}._C",
             sources,
+            include_dirs=include_dirs,
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
             py_limited_api=py_limited_api,
